@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import SmartClassLogo from '../SmartClassLogo';
 
 export default function Login({ onLoginSuccess }) {
   const [isRegister, setIsRegister] = useState(false);
@@ -72,22 +73,11 @@ export default function Login({ onLoginSuccess }) {
         padding: '36px',
         boxShadow: '0 20px 40px rgba(0, 0, 0, 0.5)',
       }}>
-        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-          <div style={{
-            width: '56px',
-            height: '56px',
-            borderRadius: '16px',
-            background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '28px',
-            marginBottom: '16px',
-            boxShadow: '0 8px 20px rgba(99, 102, 241, 0.35)',
-          }}>
-            🎯
+        <div style={{ textAlign: 'center', marginBottom: '24px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div style={{ marginBottom: '16px' }}>
+            <SmartClassLogo size="lg" showSubtitle={false} />
           </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#fff', marginBottom: '6px' }}>
+          <h1 style={{ fontSize: '22px', fontWeight: 800, color: '#fff', marginBottom: '4px' }}>
             {isRegister ? 'Add / Register Teacher' : 'Instructor Portal'}
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
@@ -96,6 +86,7 @@ export default function Login({ onLoginSuccess }) {
               : 'Sign in to start live lecture attentiveness monitoring and track automated attendance.'}
           </p>
         </div>
+
 
         {/* Tab Toggle */}
         <div style={{

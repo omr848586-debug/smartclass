@@ -18,10 +18,27 @@ from backend.schemas.attendance import (
 )
 from ai.camera import camera_manager
 from ai.monitoring import monitoring_engine
+from ai.face_recognition import face_recognition_engine
 from ai.student_verification import decode_base64_image
 from backend.services.alert_service import trigger_inattention_alert
 
 router = APIRouter(prefix="/monitoring", tags=["Monitoring & Attentiveness"])
+
+
+def load_roster_embeddings(db: Session):
+    """Load all enrolled students into memory for fast real-time recognition"""
+    students_all = db.query(Student).all()
+    students_data = [
+        {
+            "id": s.id,
+            "name": s.name,
+            "roll_number": s.roll_number,
+            "email": s.email,
+            "face_encoding": s.face_encoding
+        }
+        for s in students_all
+    ]
+    face_recognition_engine.load_known_students(students_data)
 
 
 def alert_callback(student_id: Optional[int], reason: str, attentiveness_pct: float):
@@ -43,17 +60,8 @@ def alert_callback(student_id: Optional[int], reason: str, attentiveness_pct: fl
 def start_monitoring_session(payload: SessionStartRequest, db: Session = Depends(get_db)):
     session_id = str(uuid.uuid4())[:8]
 
-    student = None
-    if payload.assigned_student_id:
-        student = db.query(Student).filter(Student.id == payload.assigned_student_id).first()
-    else:
-        # Default to first student in db if exists
-        student = db.query(Student).first()
-
-    student_id = student.id if student else None
-    student_name = student.name if student else "Unassigned Student"
-    student_roll = student.roll_number if student else "N/A"
-    student_email = student.email if student else None
+    # Pre-load registered student embeddings for multi-face recognition
+    load_roster_embeddings(db)
 
     # Start camera source
     camera_manager.start_source(
@@ -66,10 +74,8 @@ def start_monitoring_session(payload: SessionStartRequest, db: Session = Depends
     monitoring_engine.start_session(
         session_id=session_id,
         lecture_title=payload.lecture_title,
-        student_id=student_id,
-        student_name=student_name,
-        student_roll=student_roll,
-        student_email=student_email
+        assigned_student_id=payload.assigned_student_id,
+        duration_minutes=payload.duration_minutes
     )
 
     return {
@@ -77,11 +83,11 @@ def start_monitoring_session(payload: SessionStartRequest, db: Session = Depends
         "session_id": session_id,
         "lecture_title": payload.lecture_title,
         "source_type": payload.source_type,
+        "duration_minutes": payload.duration_minutes,
         "camera_connected": camera_manager.is_connected,
-        "student_name": student_name,
-        "student_roll": student_roll,
-        "message": f"Attentiveness monitoring started using {payload.source_type} feed."
+        "message": f"Multi-student simultaneous AI monitoring started using {payload.source_type} feed."
     }
+
 
 
 @router.post("/session/stop")
@@ -89,36 +95,73 @@ def stop_monitoring_session(payload: SessionStopRequest, db: Session = Depends(g
     summary = monitoring_engine.stop_session()
     camera_manager.stop_source()
 
-    student_id = summary.get("student_id")
-    if student_id:
-        record = AttendanceRecord(
-            student_id=student_id,
-            lecture_title=summary.get("lecture_title", "Lecture"),
-            session_id=payload.session_id,
-            source_type=camera_manager.source_type,
-            start_time=datetime.fromisoformat(summary["start_time"]) if summary.get("start_time") else datetime.utcnow(),
-            end_time=datetime.fromisoformat(summary["end_time"]) if summary.get("end_time") else datetime.utcnow(),
-            duration_seconds=summary.get("duration_seconds", 0),
-            total_frames=summary.get("total_frames", 0),
-            attentive_frames=summary.get("attentive_frames", 0),
-            attentiveness_percentage=summary.get("attentiveness_percentage", 0.0),
-            attendance_status=summary.get("attendance_status", "PRESENT"),
-            created_at=datetime.utcnow()
-        )
-        db.add(record)
+    students_summary = summary.get("students_summary", [])
+    records_saved = 0
+
+    # If specific students were tracked, create individual attendance records
+    if len(students_summary) > 0:
+        for st in students_summary:
+            st_id = st.get("student_id")
+            if not st_id:
+                # Fallback to first student or assigned student
+                first_st = db.query(Student).first()
+                st_id = first_st.id if first_st else None
+
+            if st_id:
+                record = AttendanceRecord(
+                    student_id=st_id,
+                    lecture_title=summary.get("lecture_title", "Lecture"),
+                    session_id=payload.session_id,
+                    source_type=camera_manager.source_type,
+                    start_time=datetime.fromisoformat(summary["start_time"]) if summary.get("start_time") else datetime.utcnow(),
+                    end_time=datetime.fromisoformat(summary["end_time"]) if summary.get("end_time") else datetime.utcnow(),
+                    duration_seconds=summary.get("duration_seconds", 0),
+                    total_frames=st.get("total_frames", summary.get("total_frames", 0)),
+                    attentive_frames=st.get("attentive_frames", summary.get("attentive_frames", 0)),
+                    attentiveness_percentage=st.get("attentiveness_percentage", 100.0),
+                    attendance_status=st.get("attendance_status", "PRESENT"),
+                    created_at=datetime.utcnow()
+                )
+                db.add(record)
+                records_saved += 1
+
         db.commit()
-        db.refresh(record)
-        summary["record_id"] = record.id
+    else:
+        # If no faces were detected, save session record for assigned student
+        student = db.query(Student).first()
+        if student:
+            record = AttendanceRecord(
+                student_id=student.id,
+                lecture_title=summary.get("lecture_title", "Lecture"),
+                session_id=payload.session_id,
+                source_type=camera_manager.source_type,
+                start_time=datetime.fromisoformat(summary["start_time"]) if summary.get("start_time") else datetime.utcnow(),
+                end_time=datetime.fromisoformat(summary["end_time"]) if summary.get("end_time") else datetime.utcnow(),
+                duration_seconds=summary.get("duration_seconds", 0),
+                total_frames=summary.get("total_frames", 0),
+                attentive_frames=summary.get("attentive_frames", 0),
+                attentiveness_percentage=summary.get("attentiveness_percentage", 0.0),
+                attendance_status=summary.get("attendance_status", "ABSENT"),
+                created_at=datetime.utcnow()
+            )
+            db.add(record)
+            db.commit()
+            records_saved += 1
 
     return {
         "status": "SESSION_STOPPED",
         "summary": summary,
-        "message": f"Attendance recorded: {summary.get('attendance_status')} ({summary.get('attentiveness_percentage')}%)"
+        "records_created": records_saved,
+        "message": f"Multi-student attendance recorded for {records_saved} student(s) (Classroom Average: {summary.get('attentiveness_percentage')}%)"
     }
 
 
 @router.get("/status")
-def get_live_monitoring_status():
+def get_live_monitoring_status(db: Session = Depends(get_db)):
+    # Ensure known students are loaded
+    if len(face_recognition_engine.known_students) == 0:
+        load_roster_embeddings(db)
+
     metrics = monitoring_engine.get_live_metrics()
     metrics["camera_connected"] = camera_manager.is_connected
     metrics["source_type"] = camera_manager.source_type
@@ -142,9 +185,9 @@ def push_screen_capture_frame(payload: dict):
 
 @router.post("/trigger_alert")
 def trigger_manual_alert(payload: dict, db: Session = Depends(get_db)):
-    student_id = payload.get("student_id") or monitoring_engine.student_id
-    reason = payload.get("reason", "Manual Teacher Inattention Warning")
-    pct = monitoring_engine.get_attentiveness_percentage()
+    student_id = payload.get("student_id")
+    reason = payload.get("reason", "Teacher Inattention Warning")
+    pct = monitoring_engine.get_overall_attentiveness_percentage()
 
     alert = trigger_inattention_alert(
         db=db,
@@ -168,7 +211,7 @@ def generate_mjpeg_stream():
             time.sleep(0.04)
             continue
 
-        # Process frame with nose direction vector and HUD
+        # Process frame with simultaneous multi-face detection, nose direction vector, and HUD
         annotated_frame, _ = monitoring_engine.process_frame(frame, on_alert_needed=alert_callback)
 
         ret, buffer = cv2.imencode(".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
@@ -184,7 +227,7 @@ def generate_mjpeg_stream():
 
 @router.get("/video_feed")
 def get_video_feed():
-    """MJPEG live stream endpoint with real-time nose direction vector & HUD overlay"""
+    """MJPEG live stream endpoint with real-time multi-face nose direction vectors & HUD overlay"""
     return StreamingResponse(
         generate_mjpeg_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame"

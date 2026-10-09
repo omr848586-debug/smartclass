@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import Navbar from './navbar';
+import SmartClassLogo from './SmartClassLogo';
 import ClassroomLiveMonitor from './ClassroomLiveMonitor';
 import StudentDirectory from './pages/Dashboard';
 import AttendanceTable from './AttendanceTable';
 import AlertCenter from './AlertCard';
 import StudentVerification from './StudentVerification';
+import TeacherProfileModal from './TeacherProfileModal';
 import Login from './pages/login';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('monitor');
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const saved = localStorage.getItem('smartclass_user');
@@ -17,6 +20,21 @@ export default function App() {
       return null;
     }
   });
+
+  // Keep profile synchronized with backend
+  useEffect(() => {
+    if (currentUser) {
+      fetch('/api/auth/me')
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && !data.detail) {
+            setCurrentUser(data);
+            localStorage.setItem('smartclass_user', JSON.stringify(data));
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
 
   const handleLoginSuccess = (user) => {
     setCurrentUser(user);
@@ -28,22 +46,24 @@ export default function App() {
     setCurrentUser(null);
   };
 
+  const handleUpdateProfile = (updatedUser) => {
+    setCurrentUser(updatedUser);
+    localStorage.setItem('smartclass_user', JSON.stringify(updatedUser));
+  };
+
   if (!currentUser) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
         <header style={{
-          background: 'rgba(11, 15, 25, 0.9)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'rgba(14, 10, 31, 0.92)',
+          backdropFilter: 'blur(16px)',
+          borderBottom: '1px solid var(--border-color)',
           padding: '16px 24px',
-          textAlign: 'center'
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '24px' }}>🎯</span>
-            <span style={{ fontSize: '20px', fontWeight: 800, color: '#fff' }}>
-              Smart<span style={{ color: '#818cf8' }}>Class</span> AI
-            </span>
-          </div>
+          <SmartClassLogo size="md" showSubtitle={true} />
         </header>
 
         <main style={{ flex: 1 }}>
@@ -53,12 +73,14 @@ export default function App() {
     );
   }
 
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         currentUser={currentUser}
+        onOpenProfile={() => setIsProfileModalOpen(true)}
         onLogout={handleLogout}
       />
 
@@ -75,6 +97,15 @@ export default function App() {
         {activeTab === 'alerts' && <AlertCenter />}
         {activeTab === 'verify' && <StudentVerification />}
       </main>
+
+      {/* Teacher Profile Modal */}
+      <TeacherProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        currentUser={currentUser}
+        onUpdateProfile={handleUpdateProfile}
+        onLogout={handleLogout}
+      />
 
       <footer style={{
         textAlign: 'center',

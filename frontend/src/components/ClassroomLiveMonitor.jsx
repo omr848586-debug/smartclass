@@ -5,15 +5,23 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
   const [cameraIndex, setCameraIndex] = useState(0);
   const [rtspUrl, setRtspUrl] = useState('rtsp://admin:pass@192.168.1.100:554/live');
   const [lectureTitle, setLectureTitle] = useState('CS301: Deep Learning & Vision');
+  const [lectureDuration, setLectureDuration] = useState(15); // in minutes: 5, 15, 30, 45, 60, 120, 0 (unlimited)
   const [students, setStudents] = useState([]);
   const [selectedStudentId, setSelectedStudentId] = useState('');
   
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [sessionId, setSessionId] = useState('');
+  const [remainingSeconds, setRemainingSeconds] = useState(null);
+  const [timeExpiredAlert, setTimeExpiredAlert] = useState(false);
+
   const [metrics, setMetrics] = useState({
+    classroom_attentiveness_percentage: 100,
     attentiveness_percentage: 100,
     current_status: 'READY',
-    current_reason: 'Ready to start monitoring',
+    current_reason: 'Ready to start multi-student monitoring',
+    detected_faces_count: 0,
+    attentive_students_count: 0,
+    inattentive_students_count: 0,
     yaw: 0,
     pitch: 0,
     roll: 0,
@@ -22,6 +30,10 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
     inattentive_frames: 0,
     attendance_status: 'PRESENT',
     is_face_detected: false,
+    active_students: [],
+    tracked_students: [],
+    remaining_seconds: null,
+    is_time_expired: false,
   });
 
   const [alertSending, setAlertSending] = useState(false);
@@ -33,6 +45,9 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
   const canvasRef = useRef(null);
   const screenIntervalRef = useRef(null);
   const videoElemRef = useRef(null);
+
+  // Ref to prevent double auto-stopping
+  const isStoppingRef = useRef(false);
 
   // Load students list for assignment
   useEffect(() => {
@@ -47,22 +62,55 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
       .catch((err) => console.error('Error fetching students:', err));
   }, []);
 
-  // Poll live status metrics every 800ms
+  // Poll live status metrics every 700ms
   useEffect(() => {
     const interval = setInterval(() => {
       fetch('/api/monitoring/status')
         .then((res) => res.json())
         .then((data) => {
           setMetrics(data);
+
           if (data.is_active && !isSessionActive) {
             setIsSessionActive(true);
             setSessionId(data.session_id);
           }
+
+          // Check if server reports time expired while session is active
+          if (data.is_active && data.is_time_expired && !isStoppingRef.current) {
+            handleAutoStop();
+          }
         })
         .catch(() => {});
-    }, 800);
+    }, 700);
     return () => clearInterval(interval);
   }, [isSessionActive]);
+
+  // Client-side countdown ticker (1 second tick)
+  useEffect(() => {
+    let timer = null;
+    if (isSessionActive && lectureDuration > 0) {
+      timer = setInterval(() => {
+        setRemainingSeconds((prev) => {
+          if (prev === null) {
+            return lectureDuration * 60;
+          }
+          if (prev <= 1) {
+            // Auto stop when countdown hits 0
+            if (!isStoppingRef.current) {
+              handleAutoStop();
+            }
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      setRemainingSeconds(null);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isSessionActive, lectureDuration]);
 
   // Handle Google Meet Screen Share
   const startScreenCapture = async () => {
@@ -122,6 +170,9 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
     }
 
     try {
+      isStoppingRef.current = false;
+      setTimeExpiredAlert(false);
+
       const res = await fetch('/api/monitoring/session/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -131,17 +182,26 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
           rtsp_url: sourceType === 'RTSP' ? rtspUrl : null,
           camera_index: sourceType === 'WEBCAM' ? parseInt(cameraIndex) : 0,
           assigned_student_id: selectedStudentId ? parseInt(selectedStudentId) : null,
+          duration_minutes: lectureDuration > 0 ? lectureDuration : null,
         }),
       });
       const data = await res.json();
       setIsSessionActive(true);
       setSessionId(data.session_id);
+      if (lectureDuration > 0) {
+        setRemainingSeconds(lectureDuration * 60);
+      } else {
+        setRemainingSeconds(null);
+      }
     } catch (err) {
       alert('Failed to start session: ' + err.message);
     }
   };
 
-  const handleStopSession = async () => {
+  const handleStopSession = async (isAutoExpired = false) => {
+    if (isStoppingRef.current) return;
+    isStoppingRef.current = true;
+
     if (sourceType === 'GOOGLE_MEET') {
       stopScreenCapture();
     }
@@ -154,14 +214,26 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
       });
       const data = await res.json();
       setIsSessionActive(false);
-      setSessionSummary(data.summary);
+      setRemainingSeconds(null);
+      setSessionSummary({
+        ...data.summary,
+        autoStopped: isAutoExpired,
+        durationMinutes: lectureDuration,
+      });
       if (onAttendanceUpdated) onAttendanceUpdated();
     } catch (err) {
       alert('Failed to stop session: ' + err.message);
+    } finally {
+      isStoppingRef.current = false;
     }
   };
 
-  const handleTriggerAlert = async () => {
+  const handleAutoStop = () => {
+    setTimeExpiredAlert(true);
+    handleStopSession(true);
+  };
+
+  const handleTriggerAlert = async (targetStudentId = null, reason = null) => {
     setAlertSending(true);
     setAlertSuccessMsg('');
     try {
@@ -169,12 +241,12 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          student_id: selectedStudentId ? parseInt(selectedStudentId) : null,
-          reason: metrics.current_reason || 'Inattention Detected',
+          student_id: targetStudentId || (selectedStudentId ? parseInt(selectedStudentId) : null),
+          reason: reason || metrics.current_reason || 'Inattention Detected in Classroom',
         }),
       });
       const data = await res.json();
-      setAlertSuccessMsg('Email alert sent successfully!');
+      setAlertSuccessMsg('Inattention alert sent to student & parent!');
       setTimeout(() => setAlertSuccessMsg(''), 4000);
     } catch (err) {
       alert('Error triggering alert: ' + err.message);
@@ -183,8 +255,28 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
     }
   };
 
-  const pct = metrics.attentiveness_percentage || 100;
-  const isAttentive = metrics.current_status === 'ATTENTIVE';
+  const formatCountdown = (seconds) => {
+    if (seconds === null || seconds === undefined) return null;
+    const s = Math.max(0, seconds);
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
+    if (hrs > 0) {
+      return `${hrs}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+    }
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
+  const pct = metrics.classroom_attentiveness_percentage || metrics.attentiveness_percentage || 100;
+  const detectedCount = metrics.detected_faces_count || 0;
+  const attentiveCount = metrics.attentive_students_count || 0;
+  const inattentiveCount = metrics.inattentive_students_count || 0;
+
+  // Calculate elapsed percentage of timer for progress bar
+  const totalTimerSeconds = lectureDuration > 0 ? lectureDuration * 60 : null;
+  const timerProgressPct = (totalTimerSeconds && remainingSeconds !== null)
+    ? Math.min(100, Math.max(0, ((totalTimerSeconds - remainingSeconds) / totalTimerSeconds) * 100))
+    : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -192,7 +284,7 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
       <div className="glass-panel" style={{ padding: '20px 24px' }}>
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
           gap: '16px',
           alignItems: 'end',
         }}>
@@ -209,6 +301,26 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
             />
           </div>
 
+          {/* Lecture Duration Option with Auto-Stop */}
+          <div>
+            <label className="form-label">⏱ Lecture Duration (Auto-Stop)</label>
+            <select
+              className="form-select"
+              value={lectureDuration}
+              onChange={(e) => setLectureDuration(parseInt(e.target.value))}
+              disabled={isSessionActive}
+            >
+              <option value={1}>🚀 1 Minute (Demo / Test)</option>
+              <option value={5}>⚡ 5 Minutes (Quick Test)</option>
+              <option value={15}>⏱ 15 Minutes (Short Class)</option>
+              <option value={30}>⏱ 30 Minutes (Half Hour)</option>
+              <option value={45}>⏱ 45 Minutes (Class Period)</option>
+              <option value={60}>⌛ 1 Hour (60 Minutes)</option>
+              <option value={120}>⌛ 2 Hours (120 Minutes)</option>
+              <option value={0}>♾ Unlimited (Manual Stop)</option>
+            </select>
+          </div>
+
           {/* Video Input Source */}
           <div>
             <label className="form-label">Camera Feed Source</label>
@@ -218,9 +330,9 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
               onChange={(e) => setSourceType(e.target.value)}
               disabled={isSessionActive}
             >
-              <option value="WEBCAM">📷 Local Web Camera</option>
-              <option value="RTSP">🏫 College CCTV / RTSP Stream</option>
-              <option value="GOOGLE_MEET">🌐 Google Meet (Screen Share)</option>
+              <option value="WEBCAM">📷 Local Multi-Student Webcam</option>
+              <option value="RTSP">🏫 Classroom CCTV / RTSP Stream</option>
+              <option value="GOOGLE_MEET">🌐 Google Meet (All Attendees)</option>
             </select>
           </div>
 
@@ -235,7 +347,7 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
                 disabled={isSessionActive}
               >
                 <option value={0}>Camera 0 (Default / Integrated)</option>
-                <option value={1}>Camera 1 (External USB)</option>
+                <option value={1}>Camera 1 (Wide Angle / USB)</option>
                 <option value={2}>Camera 2</option>
               </select>
             </div>
@@ -243,7 +355,7 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
 
           {sourceType === 'RTSP' && (
             <div>
-              <label className="form-label">CCTV RTSP / IP Camera URL</label>
+              <label className="form-label">CCTV RTSP URL</label>
               <input
                 type="text"
                 className="form-input"
@@ -259,27 +371,10 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
             <div>
               <label className="form-label">Google Meet Virtual Mode</label>
               <div style={{ fontSize: '13px', color: '#818cf8', paddingTop: '8px' }}>
-                Screen Capture will activate on start
+                All student faces in Meet will be tracked
               </div>
             </div>
           )}
-
-          {/* Assign Student to Session */}
-          <div>
-            <label className="form-label">Monitored Student</label>
-            <select
-              className="form-select"
-              value={selectedStudentId}
-              onChange={(e) => setSelectedStudentId(e.target.value)}
-              disabled={isSessionActive}
-            >
-              {students.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} ({s.roll_number})
-                </option>
-              ))}
-            </select>
-          </div>
 
           {/* Action Button */}
           <div>
@@ -289,41 +384,108 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
                 style={{ width: '100%', height: '42px' }}
                 onClick={handleStartSession}
               >
-                <span>▶</span> Start AI Monitoring
+                <span>▶</span> Start Lecture Monitoring
               </button>
             ) : (
               <button
                 className="btn btn-danger"
                 style={{ width: '100%', height: '42px' }}
-                onClick={handleStopSession}
+                onClick={() => handleStopSession(false)}
               >
-                <span>⏹</span> Stop & Calculate Attendance
+                <span>⏹</span> Stop & Record Attendance
               </button>
             )}
           </div>
         </div>
+
+        {/* Live Timer Countdown & Progress Strip */}
+        {isSessionActive && (
+          <div style={{
+            marginTop: '16px',
+            paddingTop: '16px',
+            borderTop: '1px solid var(--border-color)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '18px' }}>⏱</span>
+                <div>
+                  <span style={{ fontSize: '13px', fontWeight: 700, color: '#fff' }}>
+                    {lectureDuration > 0 ? `Lecture Timer: ${lectureDuration} Min Session` : 'Continuous Session (Unlimited)'}
+                  </span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-dim)', marginLeft: '8px' }}>
+                    {lectureDuration > 0 ? 'Live detection will automatically stop when time expires' : 'Manual stop required'}
+                  </span>
+                </div>
+              </div>
+
+              {remainingSeconds !== null && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Auto-Stop In:</span>
+                  <span style={{
+                    fontSize: '16px',
+                    fontWeight: 800,
+                    fontFamily: 'monospace',
+                    color: remainingSeconds <= 60 ? '#f87171' : remainingSeconds <= 300 ? '#fbbf24' : '#34d399',
+                    background: 'rgba(0, 0, 0, 0.4)',
+                    padding: '4px 12px',
+                    borderRadius: '8px',
+                    border: `1px solid ${remainingSeconds <= 60 ? 'rgba(239, 68, 68, 0.5)' : 'rgba(16, 185, 129, 0.4)'}`,
+                  }}>
+                    ⏳ {formatCountdown(remainingSeconds)}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Visual Time Progress Bar */}
+            {totalTimerSeconds && (
+              <div style={{ width: '100%', height: '6px', background: 'rgba(255, 255, 255, 0.08)', borderRadius: '3px', overflow: 'hidden' }}>
+                <div style={{
+                  width: `${timerProgressPct}%`,
+                  height: '100%',
+                  background: timerProgressPct >= 90 ? 'linear-gradient(90deg, #f59e0b, #ef4444)' : 'linear-gradient(90deg, #6366f1, #10b981)',
+                  borderRadius: '3px',
+                  transition: 'width 1s linear',
+                }} />
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Main Monitoring Deck */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(320px, 1fr)', gap: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(340px, 1fr)', gap: '24px' }}>
         {/* Left: Video Feed Stream */}
         <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <div className="live-dot" />
               <span style={{ fontWeight: 700, fontSize: '15px' }}>
-                AI Vision Stream {isSessionActive ? '● LIVE' : '○ Standby'}
+                Classroom AI Vision Stream {isSessionActive ? '● LIVE' : '○ Standby'}
               </span>
               <span className="pill pill-neutral">{sourceType}</span>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
-                3D Nose Vector & Gaze Tracking:
+              {remainingSeconds !== null && (
+                <span className="pill pill-neutral" style={{ fontSize: '11px', color: '#fbbf24', borderColor: 'rgba(245, 158, 11, 0.3)' }}>
+                  ⏳ {formatCountdown(remainingSeconds)}
+                </span>
+              )}
+              <span className="pill pill-success" style={{ fontSize: '12px', padding: '4px 10px' }}>
+                👥 {detectedCount} In View
               </span>
-              <span className={`pill ${isAttentive ? 'pill-success' : 'pill-danger'}`}>
-                {isAttentive ? '✓ Focused' : '⚠ Inattentive'}
+              <span className="pill pill-success" style={{ fontSize: '12px', padding: '4px 10px' }}>
+                ✓ {attentiveCount} Focused
               </span>
+              {inattentiveCount > 0 && (
+                <span className="pill pill-danger" style={{ fontSize: '12px', padding: '4px 10px' }}>
+                  ⚠ {inattentiveCount} Distracted
+                </span>
+              )}
             </div>
           </div>
 
@@ -331,58 +493,58 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
           <div style={{
             position: 'relative',
             width: '100%',
-            height: '460px',
+            height: '470px',
             background: '#070a13',
             borderRadius: 'var(--radius-md)',
             overflow: 'hidden',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            border: `2px solid ${isAttentive ? 'rgba(16, 185, 129, 0.4)' : 'rgba(239, 68, 68, 0.4)'}`,
-            boxShadow: isAttentive ? '0 0 30px rgba(16, 185, 129, 0.15)' : '0 0 30px rgba(239, 68, 68, 0.15)',
+            border: `2px solid ${detectedCount > 0 && attentiveCount >= inattentiveCount ? 'rgba(16, 185, 129, 0.4)' : (detectedCount > 0 ? 'rgba(239, 68, 68, 0.4)' : 'rgba(255, 255, 255, 0.1)')}`,
+            boxShadow: '0 0 30px rgba(0, 0, 0, 0.5)',
           }}>
             {isSessionActive ? (
               <img
                 src={`/api/monitoring/video_feed?t=${sessionId}`}
-                alt="AI Attentiveness Camera Feed"
+                alt="AI Attentiveness Multi-Student Feed"
                 style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                 onError={(e) => {
                   e.target.style.display = 'none';
                 }}
               />
             ) : (
-              <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                <div style={{ fontSize: '48px', marginBottom: '12px' }}>🎯</div>
+              <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '20px' }}>
+                <div style={{ fontSize: '48px', marginBottom: '12px' }}>👥</div>
                 <div style={{ fontSize: '18px', fontWeight: 600, color: '#fff', marginBottom: '6px' }}>
-                  Camera Feed Inactive
+                  Multi-Face Camera Stream Standby
                 </div>
-                <div style={{ fontSize: '13px', maxWidth: '340px' }}>
-                  Select source (Webcam, College CCTV, or Google Meet) and click <strong>"Start AI Monitoring"</strong> to track live nose direction and calculate attendance.
+                <div style={{ fontSize: '13px', maxWidth: '380px', margin: '0 auto' }}>
+                  Select duration (e.g. <strong>5m, 15m, 1h, 2h</strong>) and click <strong>"Start Lecture Monitoring"</strong> to automatically track attentiveness and log attendance when time ends.
                 </div>
               </div>
             )}
 
             {/* Inattention Alert Toast overlay */}
-            {!isAttentive && isSessionActive && (
+            {inattentiveCount > 0 && isSessionActive && (
               <div style={{
                 position: 'absolute',
-                top: '20px',
+                top: '16px',
                 left: '50%',
                 transform: 'translateX(-50%)',
                 background: 'rgba(220, 38, 38, 0.95)',
                 color: '#fff',
-                padding: '10px 20px',
+                padding: '8px 18px',
                 borderRadius: '30px',
                 boxShadow: '0 8px 24px rgba(239, 68, 68, 0.5)',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '10px',
+                gap: '8px',
                 fontWeight: 700,
-                fontSize: '13px',
+                fontSize: '12px',
                 animation: 'pulse 1.5s infinite',
+                zIndex: 10,
               }}>
-                <span>⚠️ INATTENTION DETECTED:</span>
-                <span>{metrics.current_reason}</span>
+                <span>⚠️ {inattentiveCount} Student(s) Inattentive</span>
               </div>
             )}
           </div>
@@ -396,15 +558,17 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
             padding: '12px 16px',
             borderRadius: 'var(--radius-md)',
             border: '1px solid var(--border-color)',
+            flexWrap: 'wrap',
+            gap: '12px',
           }}>
             <div>
-              <div style={{ fontSize: '13px', fontWeight: 600 }}>Automated Email Alerts to Inattentive Student</div>
+              <div style={{ fontSize: '13px', fontWeight: 600 }}>Multi-Student Inattention Notification System</div>
               <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
-                Dispatched automatically on prolonged distraction, or send warning instantly.
+                Automated alerts dispatched to students & parents on prolonged distraction.
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               {alertSuccessMsg && (
                 <span style={{ fontSize: '12px', color: '#34d399', fontWeight: 600 }}>
                   ✓ {alertSuccessMsg}
@@ -412,30 +576,30 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
               )}
               <button
                 className="btn btn-warning"
-                onClick={handleTriggerAlert}
+                onClick={() => handleTriggerAlert()}
                 disabled={alertSending || !isSessionActive}
                 style={{ fontSize: '12px', padding: '8px 14px' }}
               >
-                <span>✉️</span> {alertSending ? 'Sending...' : 'Send Alert Email Now'}
+                <span>✉️</span> {alertSending ? 'Sending...' : 'Send Alert Email to Inattentive'}
               </button>
             </div>
           </div>
         </div>
 
-        {/* Right: Real-time Attentiveness & Head Pose Analytics */}
+        {/* Right: Real-time Multi-Student Analytics & Live Roster */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* Attentiveness Score Card */}
-          <div className="glass-panel" style={{ padding: '24px', textAlign: 'center' }}>
-            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-dim)', marginBottom: '14px' }}>
-              ATTENTIVENESS SCORE
+          {/* Classroom Attentiveness Gauge */}
+          <div className="glass-panel" style={{ padding: '22px', textAlign: 'center' }}>
+            <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-dim)', marginBottom: '12px', textTransform: 'uppercase' }}>
+              CLASSROOM ATTENTIVENESS INDEX
             </div>
 
-            {/* Circular Gauge Representation */}
+            {/* Circular Gauge */}
             <div style={{
               position: 'relative',
-              width: '160px',
-              height: '160px',
-              margin: '0 auto 16px auto',
+              width: '140px',
+              height: '140px',
+              margin: '0 auto 14px auto',
               borderRadius: '50%',
               background: `conic-gradient(${pct >= 75 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444'} ${pct * 3.6}deg, #1f2937 0deg)`,
               display: 'flex',
@@ -444,8 +608,8 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
               boxShadow: '0 0 25px rgba(0, 0, 0, 0.5)',
             }}>
               <div style={{
-                width: '130px',
-                height: '130px',
+                width: '112px',
+                height: '112px',
                 borderRadius: '50%',
                 background: '#111827',
                 display: 'flex',
@@ -454,125 +618,190 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
                 justifyContent: 'center',
               }}>
                 <div style={{
-                  fontSize: '36px',
+                  fontSize: '30px',
                   fontWeight: 800,
                   letterSpacing: '-1px',
                   color: pct >= 75 ? '#34d399' : pct >= 50 ? '#fbbf24' : '#f87171',
                 }}>
                   {pct.toFixed(0)}%
                 </div>
-                <div style={{ fontSize: '11px', color: 'var(--text-dim)', fontWeight: 600 }}>
+                <div style={{ fontSize: '10px', color: 'var(--text-dim)', fontWeight: 700 }}>
                   {metrics.attendance_status}
                 </div>
               </div>
             </div>
 
-            {/* Attendance Status Pill */}
-            <div>
-              <span className={`pill ${metrics.attendance_status === 'PRESENT' ? 'pill-success' : metrics.attendance_status === 'WARNING' ? 'pill-warning' : 'pill-danger'}`} style={{ fontSize: '13px', padding: '6px 18px' }}>
-                Attendance: {metrics.attendance_status}
+            {/* Active Students in View Summary */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: '8px',
+              marginTop: '10px',
+            }}>
+              <div style={{
+                background: 'rgba(16, 185, 129, 0.1)',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+                padding: '8px',
+                borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ fontSize: '16px', fontWeight: 800, color: '#34d399' }}>{attentiveCount}</div>
+                <div style={{ fontSize: '10px', color: '#a7f3d0', fontWeight: 600 }}>Focused Students</div>
+              </div>
+
+              <div style={{
+                background: inattentiveCount > 0 ? 'rgba(239, 68, 68, 0.12)' : 'rgba(255, 255, 255, 0.03)',
+                border: `1px solid ${inattentiveCount > 0 ? 'rgba(239, 68, 68, 0.35)' : 'var(--border-color)'}`,
+                padding: '8px',
+                borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ fontSize: '16px', fontWeight: 800, color: inattentiveCount > 0 ? '#f87171' : 'var(--text-muted)' }}>
+                  {inattentiveCount}
+                </div>
+                <div style={{ fontSize: '10px', color: inattentiveCount > 0 ? '#fca5a5' : 'var(--text-dim)', fontWeight: 600 }}>
+                  Distracted Students
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Live Detected Students In Current Frame */}
+          <div className="glass-panel" style={{ padding: '18px' }}>
+            <div style={{
+              fontSize: '12px',
+              fontWeight: 700,
+              color: 'var(--text-dim)',
+              marginBottom: '12px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}>
+              <span>CURRENTLY DETECTED IN FRAME</span>
+              <span className="pill pill-neutral" style={{ fontSize: '10px' }}>
+                {metrics.active_students?.length || 0} active
               </span>
             </div>
 
-            <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '12px' }}>
-              Requirement: Minimum <strong>75%</strong> attentiveness for Present status.
-            </div>
-          </div>
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              maxHeight: '260px',
+              overflowY: 'auto',
+            }}>
+              {metrics.active_students && metrics.active_students.length > 0 ? (
+                metrics.active_students.map((st, i) => (
+                  <div key={i} style={{
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    border: `1px solid ${st.is_attentive ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '10px 12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '13px', fontWeight: 700, color: '#fff' }}>
+                        {st.student_name}
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+                        Roll: {st.student_roll} • Yaw {st.yaw}° / Pitch {st.pitch}°
+                      </div>
+                      <div style={{ fontSize: '10px', color: st.is_attentive ? '#34d399' : '#f87171', marginTop: '2px', fontWeight: 600 }}>
+                        {st.reason}
+                      </div>
+                    </div>
 
-          {/* 3D Nose Vector & Head Pose Card */}
-          <div className="glass-panel" style={{ padding: '20px' }}>
-            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-dim)', marginBottom: '14px' }}>
-              3D NOSE & HEAD POSE TRACKING
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {/* Yaw (Left/Right) */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Nose Yaw (Left / Right):</span>
-                  <span className="mono" style={{ fontWeight: 600, color: Math.abs(metrics.yaw) > 22 ? '#f87171' : '#a5b4fc' }}>
-                    {metrics.yaw > 0 ? `+${metrics.yaw}°` : `${metrics.yaw}°`}
-                  </span>
+                    <span className={`pill ${st.is_attentive ? 'pill-success' : 'pill-danger'}`} style={{ fontSize: '10px', padding: '3px 8px' }}>
+                      {st.is_attentive ? '✓ Focused' : '⚠ Distracted'}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div style={{ textAlign: 'center', color: 'var(--text-dim)', fontSize: '12px', padding: '20px 10px' }}>
+                  No students currently detected in view.<br />
+                  Point camera toward students or start session.
                 </div>
-                <div style={{ height: '6px', background: '#1f2937', borderRadius: '3px', overflow: 'hidden' }}>
-                  <div style={{
-                    width: `${Math.min(100, Math.abs(metrics.yaw) * 2.5)}%`,
-                    height: '100%',
-                    background: Math.abs(metrics.yaw) > 22 ? '#ef4444' : '#6366f1',
-                    borderRadius: '3px',
-                    transition: 'width 0.2s ease',
-                  }} />
-                </div>
-              </div>
-
-              {/* Pitch (Up/Down) */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Nose Pitch (Up / Down):</span>
-                  <span className="mono" style={{ fontWeight: 600, color: (metrics.pitch > 18 || metrics.pitch < -16) ? '#f87171' : '#a5b4fc' }}>
-                    {metrics.pitch > 0 ? `+${metrics.pitch}°` : `${metrics.pitch}°`}
-                  </span>
-                </div>
-                <div style={{ height: '6px', background: '#1f2937', borderRadius: '3px', overflow: 'hidden' }}>
-                  <div style={{
-                    width: `${Math.min(100, Math.abs(metrics.pitch) * 3)}%`,
-                    height: '100%',
-                    background: (metrics.pitch > 18 || metrics.pitch < -16) ? '#ef4444' : '#8b5cf6',
-                    borderRadius: '3px',
-                    transition: 'width 0.2s ease',
-                  }} />
-                </div>
-              </div>
-
-              {/* Status Reason */}
-              <div style={{
-                background: 'rgba(255, 255, 255, 0.03)',
-                padding: '10px 14px',
-                borderRadius: 'var(--radius-sm)',
-                border: '1px solid var(--border-color)',
-                marginTop: '6px',
-              }}>
-                <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginBottom: '2px' }}>AI Detection Reason:</div>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: isAttentive ? '#34d399' : '#f87171' }}>
-                  {metrics.current_reason || 'Analyzing...'}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Session Frame Counters */}
-          <div className="glass-panel" style={{ padding: '18px 20px' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', textAlign: 'center' }}>
-              <div>
-                <div style={{ fontSize: '18px', fontWeight: 800, color: '#fff' }}>{metrics.total_frames}</div>
-                <div style={{ fontSize: '10px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Frames</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '18px', fontWeight: 800, color: '#34d399' }}>{metrics.attentive_frames}</div>
-                <div style={{ fontSize: '10px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Attentive</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '18px', fontWeight: 800, color: '#f87171' }}>{metrics.inattentive_frames}</div>
-                <div style={{ fontSize: '10px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Inattentive</div>
-              </div>
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Session Summary Modal */}
+      {/* Cumulative Multi-Student Session Attendance Table */}
+      {metrics.tracked_students && metrics.tracked_students.length > 0 && (
+        <div className="glass-panel" style={{ padding: '20px' }}>
+          <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '12px' }}>
+            👥 Multi-Student Real-Time Attendance Roster ({metrics.tracked_students.length} Tracked in Session)
+          </h3>
+
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-dim)', fontSize: '11px', textTransform: 'uppercase' }}>
+                  <th style={{ padding: '10px 12px' }}>Student Name</th>
+                  <th style={{ padding: '10px 12px' }}>Roll Number</th>
+                  <th style={{ padding: '10px 12px' }}>Attentive Frames</th>
+                  <th style={{ padding: '10px 12px' }}>Total Frames</th>
+                  <th style={{ padding: '10px 12px' }}>Attentiveness %</th>
+                  <th style={{ padding: '10px 12px' }}>Calculated Status</th>
+                  <th style={{ padding: '10px 12px' }}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metrics.tracked_students.map((st, idx) => (
+                  <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.04)' }}>
+                    <td style={{ padding: '10px 12px', fontWeight: 600, color: '#fff' }}>
+                      {st.student_name}
+                    </td>
+                    <td style={{ padding: '10px 12px', color: '#818cf8', fontWeight: 600 }}>
+                      {st.student_roll}
+                    </td>
+                    <td style={{ padding: '10px 12px', color: '#34d399', fontWeight: 600 }}>
+                      {st.attentive_frames}
+                    </td>
+                    <td style={{ padding: '10px 12px', color: 'var(--text-muted)' }}>
+                      {st.total_frames}
+                    </td>
+                    <td style={{ padding: '10px 12px', fontWeight: 700, color: st.attentiveness_percentage >= 75 ? '#34d399' : '#f87171' }}>
+                      {st.attentiveness_percentage}%
+                    </td>
+                    <td style={{ padding: '10px 12px' }}>
+                      <span className={`pill ${st.attendance_status === 'PRESENT' ? 'pill-success' : st.attendance_status === 'WARNING' ? 'pill-warning' : 'pill-danger'}`} style={{ fontSize: '10px', padding: '3px 8px' }}>
+                        {st.attendance_status}
+                      </span>
+                    </td>
+                    <td style={{ padding: '10px 12px' }}>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ fontSize: '11px', padding: '4px 10px' }}
+                        onClick={() => handleTriggerAlert(st.student_id, `Manual warning sent to ${st.student_name}`)}
+                      >
+                        ✉️ Warn
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Session Summary Modal for Multi-Student Results with Auto-Stop Tag */}
       {sessionSummary && (
         <div className="modal-overlay">
-          <div className="modal-content" style={{ padding: '32px' }}>
-            <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-              <div style={{ fontSize: '48px', marginBottom: '8px' }}>
-                {sessionSummary.attendance_status === 'PRESENT' ? '🎉' : '⚠️'}
+          <div className="modal-content" style={{ padding: '30px', maxWidth: '640px' }}>
+            <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+              <div style={{ fontSize: '42px', marginBottom: '6px' }}>
+                {sessionSummary.autoStopped ? '⏰' : (sessionSummary.attendance_status === 'PRESENT' ? '🎉' : '📊')}
               </div>
-              <h2 style={{ fontSize: '22px', fontWeight: 700, color: '#fff', marginBottom: '6px' }}>
-                Lecture Session Completed
+              <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', marginBottom: '4px' }}>
+                {sessionSummary.autoStopped ? 'Lecture Timer Completed (Auto-Stopped)' : 'Lecture Session Completed & Recorded'}
               </h2>
               <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-                Attentiveness metrics computed and attendance record created in database.
+                {sessionSummary.autoStopped
+                  ? `The configured ${sessionSummary.durationMinutes || lectureDuration} minute lecture duration has expired. Attendance was automatically calculated.`
+                  : 'Attentiveness scores calculated and individual attendance logged for all detected students.'}
               </p>
             </div>
 
@@ -580,50 +809,84 @@ export default function ClassroomLiveMonitor({ onAttendanceUpdated }) {
               background: 'rgba(255, 255, 255, 0.03)',
               borderRadius: 'var(--radius-md)',
               border: '1px solid var(--border-color)',
-              padding: '20px',
-              marginBottom: '24px',
+              padding: '16px',
+              marginBottom: '20px',
               display: 'flex',
               flexDirection: 'column',
-              gap: '12px',
+              gap: '10px',
+              fontSize: '13px',
             }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Student Monitored:</span>
-                <span style={{ fontWeight: 600, color: '#fff' }}>
-                  {sessionSummary.student_name} ({sessionSummary.student_roll})
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ color: 'var(--text-muted)' }}>Lecture Title:</span>
                 <span style={{ fontWeight: 600, color: '#fff' }}>{sessionSummary.lecture_title}</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Duration:</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Duration Completed:</span>
                 <span style={{ fontWeight: 600, color: '#fff' }}>{sessionSummary.duration_seconds} seconds</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Attentiveness Percentage:</span>
-                <span style={{
-                  fontWeight: 700,
-                  fontSize: '16px',
-                  color: sessionSummary.attentiveness_percentage >= 75 ? '#34d399' : '#f87171',
-                }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Classroom Attentiveness:</span>
+                <span style={{ fontWeight: 700, color: sessionSummary.attentiveness_percentage >= 75 ? '#34d399' : '#f87171' }}>
                   {sessionSummary.attentiveness_percentage}%
                 </span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', alignItems: 'center' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Automated Attendance Result:</span>
-                <span className={`pill ${sessionSummary.attendance_status === 'PRESENT' ? 'pill-success' : sessionSummary.attendance_status === 'WARNING' ? 'pill-warning' : 'pill-danger'}`}>
-                  {sessionSummary.attendance_status}
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Total Students Monitored:</span>
+                <span style={{ fontWeight: 700, color: '#818cf8' }}>
+                  {sessionSummary.total_students_monitored || (sessionSummary.students_summary?.length || 0)} Students
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Session Completion Mode:</span>
+                <span className="pill pill-success" style={{ fontSize: '10px' }}>
+                  {sessionSummary.autoStopped ? '⏰ Auto-Stop Timer' : '⏹ Manual Stop'}
                 </span>
               </div>
             </div>
 
+            {/* List of individual student results */}
+            {sessionSummary.students_summary && sessionSummary.students_summary.length > 0 && (
+              <div style={{ marginBottom: '20px', maxHeight: '200px', overflowY: 'auto' }}>
+                <div style={{ fontSize: '12px', color: 'var(--text-dim)', fontWeight: 700, marginBottom: '8px', textTransform: 'uppercase' }}>
+                  Student Attendance Breakdown
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {sessionSummary.students_summary.map((st, idx) => (
+                    <div key={idx} style={{
+                      background: 'rgba(255, 255, 255, 0.02)',
+                      padding: '8px 12px',
+                      borderRadius: 'var(--radius-sm)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      fontSize: '12px',
+                    }}>
+                      <div>
+                        <strong>{st.student_name}</strong> <span style={{ color: 'var(--text-dim)' }}>({st.student_roll})</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontWeight: 700, color: st.attentiveness_percentage >= 75 ? '#34d399' : '#f87171' }}>
+                          {st.attentiveness_percentage}%
+                        </span>
+                        <span className={`pill ${st.attendance_status === 'PRESENT' ? 'pill-success' : st.attendance_status === 'WARNING' ? 'pill-warning' : 'pill-danger'}`} style={{ fontSize: '9px', padding: '2px 6px' }}>
+                          {st.attendance_status}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button
               className="btn btn-primary"
-              style={{ width: '100%', height: '44px' }}
-              onClick={() => setSessionSummary(null)}
+              style={{ width: '100%', height: '42px' }}
+              onClick={() => {
+                setSessionSummary(null);
+                setTimeExpiredAlert(false);
+              }}
             >
-              Close & View in Attendance Table
+              Close & View Records in Attendance Table
             </button>
           </div>
         </div>

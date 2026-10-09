@@ -19,8 +19,35 @@ from backend.routers import (
 )
 
 
+def migrate_db_columns():
+    """Ensure newly added columns exist in existing SQLite tables"""
+    import sqlite3
+    db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "smartclass.db")
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        existing_cols = [c[1] for c in cursor.execute("PRAGMA table_info(teachers)").fetchall()]
+        cols_to_add = [
+            ("designation", "VARCHAR(100) DEFAULT 'Associate Professor & Lab Lead'"),
+            ("employee_id", "VARCHAR(50) DEFAULT 'EMP-CS-2024'"),
+            ("phone", "VARCHAR(50) DEFAULT '+91 98450 11223'"),
+            ("office_room", "VARCHAR(100) DEFAULT 'Faculty Block B - Room 304'"),
+            ("bio", "TEXT DEFAULT 'Specializing in Computer Vision, Facial Biometrics, and Deep Learning Neural Architectures.'"),
+            ("photo_url", "TEXT")
+        ]
+        for col_name, col_type in cols_to_add:
+            if col_name not in existing_cols:
+                try:
+                    cursor.execute(f"ALTER TABLE teachers ADD COLUMN {col_name} {col_type}")
+                except Exception as e:
+                    print(f"Migration notice for {col_name}: {e}")
+        conn.commit()
+        conn.close()
+
+
 def seed_initial_data():
     """Populate database with demo students and teacher on first launch"""
+    migrate_db_columns()
     db = SessionLocal()
     try:
         # Check if students exist
@@ -77,12 +104,18 @@ def seed_initial_data():
                 email="teacher@smartclass.edu",
                 department="Computer Science & Engineering",
                 subject="Deep Learning & Computer Vision",
+                designation="Associate Professor & Lab Lead",
+                employee_id="EMP-CS-2024",
+                phone="+91 98450 11223",
+                office_room="Faculty Block B - Room 304",
+                bio="Specializing in Computer Vision, Facial Biometrics, and Deep Learning Neural Architectures.",
                 password_hash=get_password_hash("admin123")
             )
             db.add(teacher)
             db.commit()
     finally:
         db.close()
+
 
 
 @asynccontextmanager

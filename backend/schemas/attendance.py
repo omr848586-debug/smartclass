@@ -9,6 +9,8 @@ class SessionStartRequest(BaseModel):
     rtsp_url: Optional[str] = None
     camera_index: int = 0
     assigned_student_id: Optional[int] = None  # Track specific student in 1-on-1 / verification mode
+    duration_minutes: Optional[int] = None  # e.g., 5, 15, 60, 120 or None for unlimited
+
 
 
 class SessionStopRequest(BaseModel):

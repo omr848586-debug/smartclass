@@ -1,6 +1,7 @@
 import React from 'react';
+import SmartClassLogo from './SmartClassLogo';
 
-export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout }) {
+export default function Navbar({ activeTab, setActiveTab, currentUser, onOpenProfile, onLogout }) {
   const navItems = [
     { id: 'monitor', label: 'Live AI Monitor', icon: '📹' },
     { id: 'students', label: 'Student Directory', icon: '🎓' },
@@ -10,7 +11,9 @@ export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout 
   ];
 
   const teacherName = currentUser?.name || 'Dr. Vikram Sen';
-  const teacherSubject = currentUser?.subject || currentUser?.department || 'AI & Computer Vision';
+  const teacherSubject = currentUser?.subject || currentUser?.department || 'Deep Learning & Computer Vision';
+  const teacherDesignation = currentUser?.designation || 'Faculty Lead';
+  const teacherPhoto = currentUser?.photo_url || '';
   const teacherInitials = teacherName
     .split(' ')
     .filter(Boolean)
@@ -21,9 +24,9 @@ export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout 
 
   return (
     <header style={{
-      background: 'rgba(11, 15, 25, 0.9)',
-      backdropFilter: 'blur(12px)',
-      borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+      background: 'rgba(14, 10, 31, 0.92)',
+      backdropFilter: 'blur(16px)',
+      borderBottom: '1px solid var(--border-color)',
       position: 'sticky',
       top: 0,
       zIndex: 100,
@@ -35,32 +38,11 @@ export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout 
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        height: '70px',
+        height: '72px',
       }}>
         {/* Brand Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{
-            width: '40px',
-            height: '40px',
-            borderRadius: '10px',
-            background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 4px 14px rgba(99, 102, 241, 0.4)',
-            fontSize: '20px',
-          }}>
-            🎯
-          </div>
-          <div>
-            <div style={{ fontSize: '18px', fontWeight: 800, letterSpacing: '-0.3px', color: '#fff' }}>
-              Smart<span style={{ color: '#818cf8' }}>Class</span> <span style={{ fontSize: '12px', background: '#312e81', color: '#c7d2fe', padding: '2px 8px', borderRadius: '6px', fontWeight: 600 }}>AI ATTENTIVENESS</span>
-            </div>
-            <div style={{ fontSize: '11px', color: 'var(--text-dim)', fontWeight: 500 }}>
-              Live Gaze & Automated Attendance Platform
-            </div>
-          </div>
-        </div>
+        <SmartClassLogo size="md" showSubtitle={true} />
+
 
         {/* Navigation Tabs */}
         <nav style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -79,9 +61,9 @@ export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout 
                   fontSize: '13px',
                   fontWeight: 600,
                   cursor: 'pointer',
-                  border: isActive ? '1px solid rgba(99, 102, 241, 0.5)' : '1px solid transparent',
-                  background: isActive ? 'rgba(99, 102, 241, 0.15)' : 'transparent',
-                  color: isActive ? '#a5b4fc' : 'var(--text-muted)',
+                  border: isActive ? '1px solid rgba(139, 92, 246, 0.5)' : '1px solid transparent',
+                  background: isActive ? 'rgba(139, 92, 246, 0.18)' : 'transparent',
+                  color: isActive ? '#c4b5fd' : 'var(--text-muted)',
                   transition: 'all 0.2s ease',
                 }}
               >
@@ -93,7 +75,7 @@ export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout 
         </nav>
 
         {/* Instructor Profile & System Status */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -105,56 +87,93 @@ export default function Navbar({ activeTab, setActiveTab, currentUser, onLogout 
             fontSize: '12px',
           }}>
             <div className="live-dot" />
-            <span style={{ color: '#34d399', fontWeight: 600 }}>AI Vision Active</span>
+            <span style={{ color: '#34d399', fontWeight: 600 }}>AI Active</span>
           </div>
 
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px',
-            borderLeft: '1px solid var(--border-color)',
-            paddingLeft: '16px',
-          }}>
+          {/* Interactive Teacher Profile Card */}
+          <div
+            onClick={onOpenProfile}
+            title="Click to view & edit Teacher Profile"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              padding: '6px 12px 6px 8px',
+              borderRadius: '24px',
+              background: 'rgba(139, 92, 246, 0.12)',
+              border: '1px solid rgba(139, 92, 246, 0.3)',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(139, 92, 246, 0.25)';
+              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.6)';
+              e.currentTarget.style.transform = 'translateY(-1px)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(139, 92, 246, 0.12)';
+              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.3)';
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
+          >
+            {/* Teacher Avatar Photo or Initials */}
             <div style={{
-              width: '34px',
-              height: '34px',
+              width: '36px',
+              height: '36px',
               borderRadius: '50%',
               background: '#3730a3',
               color: '#c7d2fe',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontSize: '12px',
+              fontSize: '13px',
               fontWeight: 700,
+              overflow: 'hidden',
+              border: '2px solid rgba(139, 92, 246, 0.5)',
+              flexShrink: 0,
             }}>
-              {teacherInitials}
-            </div>
-            <div>
-              <div style={{ fontSize: '13px', fontWeight: 600, color: '#fff' }}>{teacherName}</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>{teacherSubject}</div>
+              {teacherPhoto ? (
+                <img src={teacherPhoto} alt={teacherName} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              ) : (
+                teacherInitials
+              )}
             </div>
 
-            {onLogout && (
-              <button
-                onClick={onLogout}
-                title="Sign out of teacher account"
-                style={{
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
-                  color: '#f87171',
-                  borderRadius: '6px',
-                  padding: '4px 8px',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  marginLeft: '6px',
-                  transition: 'all 0.2s ease',
-                }}
-              >
-                Logout
-              </button>
-            )}
+            <div style={{ textAlign: 'left' }}>
+              <div style={{ fontSize: '13px', fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                {teacherName} <span style={{ fontSize: '10px', color: '#c4b5fd' }}>▼</span>
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+                {teacherDesignation}
+              </div>
+            </div>
           </div>
+
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              title="Sign out of teacher account"
+              style={{
+                background: 'rgba(239, 68, 68, 0.12)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: '#f87171',
+                borderRadius: '8px',
+                padding: '7px 12px',
+                fontSize: '12px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)';
+              }}
+            >
+              Sign Out
+            </button>
+          )}
         </div>
       </div>
     </header>

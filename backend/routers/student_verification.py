@@ -6,9 +6,19 @@ from backend.database import get_db
 from backend.models.student import Student
 from backend.models.student_verification import StudentVerification
 from backend.schemas.student_verification import VerificationRequest, VerificationResponse
-from backend.services.student_verification_service import verify_student, enroll_student_face
+from backend.services.student_verification_service import verify_student, enroll_student_face, check_face_validity
 
 router = APIRouter(prefix="/verification", tags=["Student Verification"])
+
+
+@router.post("/check-face")
+def validate_face_image(payload: dict, db: Session = Depends(get_db)):
+    image_base64 = payload.get("image_base64")
+    student_id = payload.get("student_id")
+    if not image_base64:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing image_base64")
+    return check_face_validity(db, image_base64, student_id=student_id)
+
 
 
 @router.post("/verify", response_model=VerificationResponse)

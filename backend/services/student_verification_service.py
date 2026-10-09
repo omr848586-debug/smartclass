@@ -6,6 +6,64 @@ from sqlalchemy.orm import Session
 from backend.models.student import Student
 from backend.models.student_verification import StudentVerification
 from ai.student_verification import compute_face_features, compare_features, decode_base64_image
+from ai.face_detection import detect_faces
+
+
+def check_face_validity(db: Session, image_base64: str, student_id: Optional[int] = None) -> Dict[str, Any]:
+    """Check face validity and detect potential duplicates before saving student"""
+    img = decode_base64_image(image_base64)
+    if img is None:
+        return {"valid": False, "message": "Invalid image format"}
+
+    faces = detect_faces(img)
+    if not faces:
+        return {
+            "valid": False,
+            "face_detected": False,
+            "message": "No human face detected in image. Please ensure the face is clearly visible and centered."
+        }
+
+    features = compute_face_features(img)
+    if not features:
+        return {
+            "valid": False,
+            "face_detected": False,
+            "message": "Unable to extract facial features. Please ensure proper lighting and a frontal face view."
+        }
+
+    # Check for duplicate face against existing students
+    query = db.query(Student).filter(Student.face_encoding.isnot(None))
+    if student_id:
+        query = query.filter(Student.id != student_id)
+
+    other_students = query.all()
+    for other in other_students:
+        try:
+            other_features = json.loads(other.face_encoding)
+            is_match, conf = compare_features(features, other_features)
+            if is_match and conf >= 0.80:
+                return {
+                    "valid": False,
+                    "face_detected": True,
+                    "duplicate": True,
+                    "conflict_student": {
+                        "name": other.name,
+                        "roll_number": other.roll_number,
+                        "department": other.department
+                    },
+                    "message": f"Biometric Conflict: Face matches registered student '{other.name}' ({other.roll_number}) with {int(conf*100)}% similarity."
+                }
+        except Exception:
+            continue
+
+    return {
+        "valid": True,
+        "face_detected": True,
+        "duplicate": False,
+        "face_count": len(faces),
+        "message": "Face verified! Clear frontal face detected and unique."
+    }
+
 
 
 def enroll_student_face(db: Session, student_id: int, image_base64: str) -> Dict[str, Any]:
